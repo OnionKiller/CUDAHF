@@ -15,6 +15,9 @@ __global__ void addKernel(int *c, const int *a, const int *b)
     c[i] = a[i] + b[i];
 }
 
+
+
+
 // call on 512 threads
 __global__ void scanKernel(int* cumsum, int* data) {
     auto i = threadIdx.x + blockDim.x * blockIdx.x;
@@ -31,7 +34,7 @@ __global__ void scanKernel(int* cumsum, int* data) {
     auto ni = li + 1;
     // upsweep
     #pragma unroll
-    for (auto t = 1; t <= 10; t++)
+    for (auto t = 1; t <= 3; t++)
     {
         auto shift = 1 << t-1;
         if (ni % (1 << t) == 0)
@@ -44,7 +47,7 @@ __global__ void scanKernel(int* cumsum, int* data) {
 
     // downsweep
     #pragma unroll
-    for (auto t = 10; t > 0; t--)
+    for (auto t = 3; t > 0; t--)
     {
         auto shift = 1 << t - 1;
         // last index when the addition is not possible (it is known to be the the last index only affected)
@@ -57,21 +60,24 @@ __global__ void scanKernel(int* cumsum, int* data) {
 
     cumsum[i] = s[li];
     __syncthreads();
-    // sync global memory
-    threadfence_block();
-    //collect previous sums to have full cumulative value  
-    // zero out block memory
+}
+
+//collect previous sums to have full cumulative value  
+__global__ void scanPartialResults(int* sum,int* data) {
+    auto i = threadIdx.x + blockDim.x * blockIdx.x;
+    auto li = threadIdx.x;
+    auto ni = li + 1;
+
+    __shared__ int s[1024];
     s[li] = 0;
     // copy previous sum values to shared
     if (li < blockIdx.x)
-        s[li] = cumsum[blockDim.x * li + 1023];
+        s[li] = data[blockDim.x * li + 7];
     __syncthreads();
 
-    // mathematical indexing
-    auto ni = li + 1;
     // upsweep
-#pragma unroll
-    for (auto t = 1; t <= 10; t++)
+    //#pragma unroll
+    for (auto t = 1; t <= 3; t++)
     {
         auto shift = 1 << t - 1;
         if (ni % (1 << t) == 0)
@@ -82,13 +88,13 @@ __global__ void scanKernel(int* cumsum, int* data) {
     }
 
     //add cumulative sum
-        cumsum[i] += s[1023];
+    sum[i] += s[7];
     __syncthreads();
 }
 
 int main()
 {
-    const int arraySize = 10;
+    const int arraySize = 32;
     int a[arraySize];
     int b[arraySize];
 
@@ -97,7 +103,7 @@ int main()
     auto distribution = std::binomial_distribution<int>(1023, 1. / 128.);
 
     for (auto& i : b)
-        i = distribution(gen);
+        i = 1;
 
     // Add vectors in parallel.
     cudaError_t cudaStatus = scanWithCuda(a, b, arraySize);
@@ -159,7 +165,10 @@ cudaError_t scanWithCuda(int* a, const int* b, unsigned int size)
         goto Error;
     }
     // Launch a kernel on the GPU with one thread for each element.
-    scanKernel <<<4, size >> > (dev_a, dev_b);
+    scanKernel <<<4, size/4 >> > (dev_a, dev_b);
+    // sync blocks
+    // sum over blocks
+    scanPartialResults<<<4,size/4>>>(dev_a,dev_a);
 
     // Check for any errors launching the kernel
     cudaStatus = cudaGetLastError();
