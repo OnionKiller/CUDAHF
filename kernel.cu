@@ -81,23 +81,8 @@ __global__ void scanKernel(int* cumsum, int* data) {
         __syncthreads();
     }
 
-
-    // downsweep
-#pragma unroll
-    for (auto t = 10; t > 0; t--)
-    {
-        auto shift = 1 << t - 1;
-        // last index when the addition is not possible (it is known to be the the last index only affected)
-        if (ni != 1024 && ni % (1 << t) == 0)
-        {
-            s[ni + shift - 1] += s[ni - 1];
-        }
-        __syncthreads();
-    }
-
     //add cumulative sum
-    if(blockIdx.x != 0)
-        cumsum[i] += s[blockIdx.x-1];
+        cumsum[i] += s[1023];
     __syncthreads();
 }
 
