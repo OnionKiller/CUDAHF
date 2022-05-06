@@ -16,8 +16,24 @@ __global__ void addKernel(int *c, const int *a, const int *b)
     c[i] = a[i] + b[i];
 }
 
+__device__ inline void roundingHelper(int* left, int* right)
+{
+    const int binMax = 60;
+    auto l = *left;
+    auto r = *right;
+    if ((l % binMax + r % binMax) <= binMax)
+        return;
+    *left = (((l - 1) / binMax) + 1) * binMax;
+    *right = (((r - 1) / binMax) + 1) * binMax;
+}
 
+__global__ void divideScanResult(int* ret, int* in) 
+{
+    auto i = threadIdx.x + blockIdx.x * blockDim.x;
+    ret[i] = (in[i] - 1) / 50;
+    //ret[i] = in[i];
 
+}
 
 //could be a call on 512 threads
 __global__ void scanKernel(int* cumsum, int* data) {
@@ -93,6 +109,81 @@ __global__ void scanPartialResults(int* sum,int* data) {
     __syncthreads();
 }
 
+//could be a call on 512 threads
+__global__ void scanKernelModified(int* cumsum, int* data) {
+    auto i = threadIdx.x + blockDim.x * blockIdx.x;
+    auto li = threadIdx.x;
+    if (li > 1024)
+        return;
+    // move to shared memory per block
+    __shared__ int s[1024];
+    s[li] = data[i];
+
+    __syncthreads();
+
+    // mathematical indexing
+    auto ni = li + 1;
+    // upsweep
+#pragma unroll
+    for (auto t = 1; t <= 10; t++)
+    {
+        auto shift = 1 << t - 1;
+        if (ni % (1 << t) == 0)
+        {
+            roundingHelper(&s[li-shift], &s[li]);
+            s[ni - 1] += s[ni - shift - 1];
+        }
+        __syncthreads();
+    }
+
+
+    // downsweep
+    #pragma unroll
+    for (auto t = 10; t > 0; t--)
+    {
+        auto shift = 1 << t - 1;
+        // last index when the addition is not possible (it is known to be the the last index only affected)
+        if (ni != 1024 && ni % (1 << t) == 0)
+        {
+            s[ni + shift - 1] += s[ni - 1];
+        }
+        __syncthreads();
+    }
+    cumsum[i] = s[li];
+    __syncthreads();
+}
+
+//collect previous sums to have full cumulative value  
+__global__ void scanPartialResultsModified(int* sum, int* data) {
+    auto i = threadIdx.x + blockDim.x * blockIdx.x;
+    auto li = threadIdx.x;
+    auto ni = li + 1;
+
+    __shared__ int s[1024];
+    s[li] = 0;
+    // copy previous sum values to shared
+    if (li < blockIdx.x)
+        s[li] = data[blockDim.x * li + 1023];
+    __syncthreads();
+
+    // upsweep
+    //#pragma unroll
+    for (auto t = 1; t <= 10; t++)
+    {
+        auto shift = 1 << t - 1;
+        if (ni % (1 << t) == 0)
+        {
+            roundingHelper(&s[li - shift], &s[li]);
+            s[ni - 1] += s[ni - shift - 1];
+        }
+        __syncthreads();
+    }
+
+    //add cumulative sum
+    sum[i] = data[i] + s[1023];
+    __syncthreads();
+}
+
 int main()
 {
     const int arraySize = 1024*1024;
@@ -100,11 +191,11 @@ int main()
     int* b = new int[arraySize];
 
     std::random_device rd;
-    auto gen = std::mt19937(rd());
+    auto gen = std::mt19937(2502341);
     auto distribution = std::binomial_distribution<int>(1023, 1. / 128.);
 
     std::generate(a, a + arraySize, [&]() {
-        return 1;
+        return distribution(gen);
         });
 
     // Add vectors in parallel.
@@ -115,22 +206,35 @@ int main()
     }
 
     std::cout << "test full sum" << std::endl;
-    for (auto i = 2025; i < 2050; i++)
+    for (auto i = 0; i < 40; i++)
         std::cout << a[i] << ',';
     std::cout<<std::endl;
     for (auto i = 10; i-- > 0;)
         std::cout << '-';
     std::cout << std::endl;
-    for (auto j = 1; j < 1024; j++)
+    for (auto j = 0; j < 40; j++)
+        std::cout << b[j] << ',';
+    std::cout << std::endl;
+    for (auto i = 10; i-- > 0;)
+        std::cout << '-';
+    std::cout << std::endl;
+    for (auto j = 1010; j < 1040; j++)
+        std::cout << b[j] << ',';
+
+    auto acc = 0;
+    auto l = 0;
+    for (auto i = 0; i < arraySize; i++)
     {
-        if(b[j*1024]-b[j*1024-1] != 1)
+        if (l != b[i])
         {
-            std::cout << std::endl << "error at:" << j << std::endl;
-        for(auto i = j*1024-5;i<j*1024+5;i++)
-            std::cout << b[i] << ',';
+            l = b[i];
+            acc = 0;
+            continue;
         }
+        acc += b[i];
+        if (acc > 1024)
+            std::cout << "Error at index " << i << std::endl;
     }
-    std::cout << std::endl << " Full sum is: " << b[1024 * 1024 - 1] << " expected: " << 1024 * 1024;
 
     // cudaDeviceReset must be called before exiting in order for profiling and
     // tracing tools such as Nsight and Visual Profiler to show complete traces.
@@ -175,11 +279,17 @@ cudaError_t scanWithCuda(int * ret, const int * in, unsigned int size)
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
     }
+
+
+
     // Launch a kernel on the GPU with one thread for each element.
-    scanKernel <<<1024, 1024 >> > (dev_ret, dev_in);
+    scanKernelModified <<<1024, 1024 >> > (dev_ret, dev_in);
     // sync blocks
     // sum over blocks
     scanPartialResults<<<1024, 1024>>>(dev_in, dev_ret);
+    divideScanResult<< <1024, 1024 >> > (dev_ret, dev_in);
+
+
 
     // Check for any errors launching the kernel
     cudaStatus = cudaGetLastError();
@@ -197,7 +307,7 @@ cudaError_t scanWithCuda(int * ret, const int * in, unsigned int size)
     }
 
     // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(ret, dev_in, size * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(ret, dev_ret, size * sizeof(int), cudaMemcpyDeviceToHost);
     if (cudaStatus != cudaSuccess) {
         fprintf(stderr, "cudaMemcpy failed!");
         goto Error;
