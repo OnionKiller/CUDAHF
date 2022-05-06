@@ -18,7 +18,7 @@ __global__ void addKernel(int *c, const int *a, const int *b)
 
 __device__ inline void roundingHelper(int* left, int* right)
 {
-    const int binMax = 60;
+    const int binMax = 1024;
     auto l = *left;
     auto r = *right;
     if ((l % binMax + r % binMax) <= binMax)
@@ -30,7 +30,7 @@ __device__ inline void roundingHelper(int* left, int* right)
 __global__ void divideScanResult(int* ret, int* in) 
 {
     auto i = threadIdx.x + blockIdx.x * blockDim.x;
-    ret[i] = (in[i] - 1) / 50;
+    ret[i] = (in[i] - 1) / 1024;
     //ret[i] = in[i];
 
 }
@@ -231,7 +231,7 @@ int main()
             acc = 0;
             continue;
         }
-        acc += b[i];
+        acc += a[i];
         if (acc > 1024)
             std::cout << "Error at index " << i << std::endl;
     }
